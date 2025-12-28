@@ -1,5 +1,6 @@
 import os
 import time
+import asyncio
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -12,7 +13,7 @@ from telegram.ext import (
     filters,
 )
 
-print("🚀 === SVITLOBOT НОВИЙ ===")
+print("🚀 === SVITLOBOT v20+ ASYNC ===")
 
 # CONFIG
 BOT_TOKEN = os.environ["BOT_TOKEN"]
@@ -31,7 +32,7 @@ def kyiv_time():
 
 def cloud_login():
     global cloud_token
-    print("🔌 TP-Link логін...")
+    print("🔌 TP-Link...")
     r = requests.post(CLOUD_URL, json={
         "method": "login",
         "params": {
@@ -46,7 +47,7 @@ def cloud_login():
 
 def fetch_device_id():
     global device_id
-    print("🔍 Шукаємо розетку...")
+    print("🔍 Розетки...")
     r = requests.post(f"{CLOUD_URL}/?token={cloud_token}", json={"method": "getDeviceList"}, timeout=15).json()
     devices = r["result"]["deviceList"]
     
@@ -61,11 +62,10 @@ def fetch_device_id():
             print(f"✅ ✅ РОЗЕТКА: {nickname}")
             return True
     
-    print("⚠️ Розеток не знайдено")
+    print("⚠️ Розеток немає")
     return False
 
 def power_present():
-    """P110: responseData Є = світло Є"""
     if not device_id: return True
     
     try:
@@ -86,7 +86,7 @@ def power_present():
         return has_response
         
     except Exception as e:
-        print(f"⚠️ P110 помилка: {e}")
+        print(f"⚠️ P110: {e}")
         return False
 
 def build_22_message(text: str):
@@ -117,30 +117,4 @@ async def power_job(context: ContextTypes.DEFAULT_TYPE):
     now = kyiv_time()
     if not state:
         power_off_at = time.time()
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"⚡ Світло зникло — {now}")
-        print(f"🚨 АВАРІЯ: {now}")
-    else:
-        minutes = int((time.time() - power_off_at) / 60) if power_off_at else 0
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"🔌 Світло зʼявилось — {now}\n⏱️ Не було: {minutes} хв")
-        print(f"✅ ВІДНОВЛЕНО: {now}")
-    
-    last_state = state
-
-def main():
-    print("🚀 Ініціалізація...")
-    cloud_login()
-    tplink_ok = fetch_device_id()
-    print(f"🔌 TP-Link: {'✅ OK' if tplink_ok else '⚠️ SKIP'}")
-    
-    print("🤖 Telegram бот...")
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
-    app.job_queue.run_repeating(power_job, interval=30, first=10)
-    
-    print("🎉 DTEK 2.2 + P110 АКТИВНІ!")
-    print("⏰ Перевірка кожні 30 секунд")
-    app.run_polling(drop_pending_updates=True)
-
-if __name__ == "__main__":
-    main()
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=f"⚡ Світло зникло
