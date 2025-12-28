@@ -1,4 +1,1 @@
 python-telegram-bot==21.7
-python-kasa
-requests
-
