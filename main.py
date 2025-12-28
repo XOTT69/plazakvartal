@@ -1,6 +1,5 @@
 import os
 import time
-import signal
 import logging
 import requests
 from datetime import datetime
@@ -8,53 +7,46 @@ from zoneinfo import ZoneInfo
 
 from telegram import Update
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     ContextTypes,
     MessageHandler,
     filters,
+    CommandHandler
 )
 
-# LOGGING для Railway
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Railway logging
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-logger.info("🚀 === SVITLOBOT RAILWAY START ===")
+logger.info("🚀 SVITLOBOT RAILWAY START")
 
-# Railway бере змінні з Dashboard
+# Railway Variables
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
 TAPO_EMAIL = os.environ.get("TAPO_USERNAME")
 TAPO_PASSWORD = os.environ.get("TAPO_PASSWORD")
-CLOUD_URL = "https://eu-wap.tplinkcloud.com"
 
 if not BOT_TOKEN:
-    logger.error("❌ BOT_TOKEN обов'язковий!")
-    exit(1)
+    logger.error("❌ BOT_TOKEN required!")
+    raise ValueError("BOT_TOKEN missing")
 
-# Глобальні змінні
+# Global state
 cloud_token = None
 device_id = None
 last_state = None
 power_off_at = None
-app_instance = None
 
 def kyiv_time():
     return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%H:%M")
 
-def kyiv_datetime():
-    return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m.%Y %H:%M")
-
 def cloud_login():
     global cloud_token
     if not TAPO_EMAIL or not TAPO_PASSWORD:
-        logger.warning("⚠️ TAPO дані відсутні - без розетки")
+        logger.warning("⚠️ No TAPO credentials - P110 disabled")
         return False
     
     try:
-        r = requests.post(CLOUD_URL, json={
+        r = requests.post("https://eu-wap.tplinkcloud.com", json={
             "method": "login",
             "params": {
                 "appType": "Tapo_Android",
@@ -66,11 +58,11 @@ def cloud_login():
         
         if "result" in r and "token" in r["result"]:
             cloud_token = r["result"]["token"]
-            logger.info("✅ TP-Link OK")
+            logger.info("✅ TP-Link login OK")
             return True
-        logger.error(f"❌ TP-Link: {r}")
+        logger.error(f"❌ TP-Link login failed: {r}")
     except Exception as e:
-        logger.error(f"❌ TP-Link: {e}")
+        logger.error(f"❌ TP-Link error: {e}")
     return False
 
 def fetch_device_id():
@@ -79,19 +71,20 @@ def fetch_device_id():
     
     try:
         r = requests.post(
-            f"{CLOUD_URL}/?token={cloud_token}",
+            f"https://eu-wap.tplinkcloud.com/?token={cloud_token}",
             json={"method": "getDeviceList"},
             timeout=20
         ).json()
         
-        for d in r["result"]["deviceList"]:
+        devices = r.get("result", {}).get("deviceList", [])
+        for d in devices:
             if "PLUG" in d.get("deviceType", "").upper():
                 device_id = d["deviceId"]
-                logger.info(f"✅ P110: {d.get('nickname')} (ID={device_id})")
+                logger.info(f"✅ P110 found: {d.get('nickname', 'P110')} (ID={device_id})")
                 return True
-        logger.warning("⚠️ Розетку не знайдено")
+        logger.warning("⚠️ No P110 plug found")
     except Exception as e:
-        logger.error(f"❌ Пошук P110: {e}")
+        logger.error(f"❌ Device search failed: {e}")
     return False
 
 def power_present():
@@ -99,7 +92,7 @@ def power_present():
     
     try:
         r = requests.post(
-            f"{CLOUD_URL}/?token={cloud_token}",
+            f"https://eu-wap.tplinkcloud.com/?token={cloud_token}",
             json={
                 "method": "passthrough",
                 "params": {
@@ -126,13 +119,13 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text or update.message.caption or ""
     payload = build_22_message(text)
     if payload:
+        logger.info("📨 DTEK 2.2 message forwarded")
         await context.bot.send_message(chat_id=CHANNEL_ID, text=payload)
 
 async def power_job(context: ContextTypes.DEFAULT_TYPE):
     global last_state, power_off_at
     
     state = power_present()
-    
     if state == last_state: return
     
     now = kyiv_time()
@@ -140,37 +133,49 @@ async def power_job(context: ContextTypes.DEFAULT_TYPE):
     if not state:
         power_off_at = time.time()
         msg = f"⚡ *СВІТЛО ЗНИКЛО*\n🕐 {now}"
-        logger.warning(f"🚨 АВАРІЯ: {now}")
+        logger.warning(f"🚨 LIGHT OFF: {now}")
     else:
         minutes = int((time.time() - power_off_at) / 60) if power_off_at else 0
         msg = f"🔌 *СВІТЛО Є*\n🕐 {now}\n⏱️ Не було: {minutes} хв"
-        logger.info(f"✅ ВІДНОВЛЕНО: {now}")
+        logger.info(f"✅ LIGHT ON: {now} ({minutes}min offline)")
     
-    await context.bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="Markdown")
+    try:
+        await context.bot.send_message(chat_id=CHANNEL_ID, text=msg, parse_mode="Markdown")
+    except Exception as e:
+        logger.error(f"❌ Telegram send failed: {e}")
+    
     last_state = state
 
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("✅ Svitlobot запущено!")
+
 def main():
-    global app_instance
-    
-    # TP-Link (опціонально)
+    # TP-Link setup (optional)
     tapo_ready = False
     if cloud_login():
         tapo_ready = fetch_device_id()
     
-    logger.info("🤖 Telegram Bot...")
-    app_instance = ApplicationBuilder().token(BOT_TOKEN).build()
+    logger.info(f"🤖 Starting bot... P110: {'✅' if tapo_ready else '❌'}")
     
-    app_instance.add_handler(MessageHandler(
+    # Telegram Application
+    application = Application.builder().token(BOT_TOKEN).build()
+    
+    # Handlers
+    application.add_handler(CommandHandler("start", start))
+    application.add_handler(MessageHandler(
         (filters.TEXT | filters.CAPTION) & ~filters.COMMAND, 
         handle_message
     ))
     
-    if tapo_ready and app_instance.job_queue:
-        app_instance.job_queue.run_repeating(power_job, interval=30, first=10)
-        logger.info("⏰ P110 моніторинг запущено")
+    # P110 monitoring
+    if tapo_ready:
+        application.job_queue.run_repeating(power_job, interval=30, first=10)
+        logger.info("⏰ P110 monitoring started (30s)")
     
-    logger.info("🎉 SVITLOBOT готовий! DTEK + P110")
-    app_instance.run_polling(drop_pending_updates=True)
+    logger.info("🎉 Svitlobot ready! DTEK + P110")
+    
+    # Railway keep-alive
+    application.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
     main()
