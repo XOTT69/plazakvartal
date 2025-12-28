@@ -1,82 +1,96 @@
 import os
-import asyncio
-from kasa import SmartPlug
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram import Update
+from telegram.ext import (
+    ApplicationBuilder,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-CHANNEL_ID = "-1003534080985"
-TAPO_USERNAME = os.getenv("TAPO_USERNAME")
-TAPO_PASSWORD = os.getenv("TAPO_PASSWORD")
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHANNEL_ID = -1003534080985
 
-plug = None
-
-async def init_plug():
-    global plug
-    try:
-        plug = SmartPlug("tapo_p110")
-        await plug.protocol.initiate_connection()
-        await plug.update()
-        print("✅ python-kasa P110 підключено!")
-    except Exception as e:
-        print(f"❌ kasa error: {e}")
 
 def build_22_message(text: str) -> str | None:
     lines = text.splitlines()
-    header = next((l.strip() for l in lines if l.strip()), None)
-    if not header:
+
+    # Шапка: перший непорожній рядок
+    header = None
+    for line in lines:
+        if line.strip():
+            header = line
+            break
+    if header is None:
         return None
+
+    # ===== 1) Формат "Підгрупа 2.2 відключення" (Зміни у графіку) =====
+    start_22 = None
     for i, line in enumerate(lines):
         if "Підгрупа" in line and "2.2" in line:
-            block = [l.strip() for l in lines[i:] if l.strip()]
-            return "\n".join([header] + [""] + block)
+            start_22 = i
+            break
+
+    if start_22 is not None:
+        # блок 2.2: від заголовка до першої пустої строки
+        block = []
+        for line in lines[start_22:]:
+            if line.strip() == "" and block:
+                break
+            block.append(line)
+        block = [l for l in block if l.strip()]
+
+        # шапка = перші два непорожні рядки
+        header_lines = []
+        for line in lines:
+            if line.strip():
+                header_lines.append(line)
+            if len(header_lines) == 2:
+                break
+
+        result_lines = header_lines + [""] + block
+        return "\n".join(result_lines).strip()
+
+    # ===== 2) Формат "О 18:30 / Вмикаємо 2.2 підгрупу" =====
+    line_22 = None
     for line in lines:
         if "2.2" in line and "підгрупу" in line:
-            return f"{header}\n{line.strip()}"
+            line_22 = line
+            break
+
+    if line_22:
+        if line_22 == header:
+            return line_22
+        return f"{header}\n{line_22}"
+
     return None
 
+
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or update.message.caption or ""
+    msg = update.message
+    if not msg:
+        return
+
+    text = msg.text or msg.caption or ""
+    if not text:
+        return
+
     payload = build_22_message(text)
-    if payload:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=payload)
+    if not payload:
+        return
 
-async def cmd_status(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if plug:
-        await plug.update()
-        status = "🔌 Світло Є" if plug.is_on else "⚡ Світла НЕМА"
-        await update.message.reply_text(status)
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=status)
-    else:
-        await update.message.reply_text("❌ Розетка недоступна")
+    await context.bot.send_message(chat_id=CHANNEL_ID, text=payload)
 
-async def cmd_on(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if plug:
-        await plug.turn_on()
-        await plug.update()
-        status = "🔌 Світло Є" if plug.is_on else "⚡ Світла НЕМА"
-        await update.message.reply_text(f"🔌 ВКЛ / {status}")
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=status)
 
-async def cmd_off(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if plug:
-        await plug.turn_off()
-        await plug.update()
-        status = "🔌 Світло Є" if plug.is_on else "⚡ Світла НЕМА"
-        await update.message.reply_text(f"🔌 ВИКЛ / {status}")
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=status)
-
-async def main():
-    await init_plug()
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
-    app.add_handler(CommandHandler("status", cmd_status))
-    app.add_handler(CommandHandler("on", cmd_on))
-    app.add_handler(CommandHandler("off", cmd_off))
-    
-    print("🚀 Railway python-kasa Bot запущено!")
-    await app.run_polling()
+
+    app.add_handler(MessageHandler(
+        (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+        handle_message,
+    ))
+
+    app.run_polling()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()
