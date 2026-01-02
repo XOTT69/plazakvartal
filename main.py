@@ -24,12 +24,12 @@ TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
 TUYA_DEVICE_ID = os.environ.get("TUYA_DEVICE_ID", "")
 TUYA_REGION = "eu"
 
-print(f"DEBUG: TUYA_DEVICE_ID='{TUYA_DEVICE_ID[:8]}...' ({len(TUYA_DEVICE_ID)})")
-print(f"DEBUG: Access len={len(TUYA_ACCESS_ID)}, Secret len={len(TUYA_ACCESS_SECRET)}")
+print(f"TUYA_DEVICE_ID len: {len(TUYA_DEVICE_ID)}")
+print(f"Access len: {len(TUYA_ACCESS_ID)}, Secret len: {len(TUYA_ACCESS_SECRET)}")
 
 if not BOT_TOKEN:
     print("❌ BOT_TOKEN missing!")
-    raise ValueError("BOT_TOKEN required")
+    exit(1)
 
 last_power_state = False
 power_off_time = time.time()
@@ -44,39 +44,38 @@ def tuya_sign(base_url, params):
 
 async def get_power_status():
     if not all([TUYA_DEVICE_ID, TUYA_ACCESS_ID, TUYA_ACCESS_SECRET]):
-        print("❌ Tuya config missing")
+        print("❌ Tuya config incomplete")
         return None
     try:
-        print("🔍 Checking Tuya...")
+        print("🔍 Tuya query...")
         ts = str(int(time.time()))
         url = f"https://{TUYA_REGION}.tuya.com/v1.0/iot-03/devices/{TUYA_DEVICE_ID}/status"
         params = {"access_id": TUYA_ACCESS_ID, "timestamp": ts}
         sign = tuya_sign(url.split("?")[0], params)
         headers = {
-            "client_id": TUYA_ACCESS_ID, 
-            "sign": sign, 
-            "t": ts, 
-            "sign_method": "HMAC-SHA256",
-            "Content-Type": "application/json"
+            "client_id": TUYA_ACCESS_ID,
+            "sign": sign,
+            "t": ts,
+            "sign_method": "HMAC-SHA256"
         }
         resp = requests.get(url, params=params, headers=headers, timeout=10)
         data = resp.json()
-        print(f"Tuya response: {data.get('success')}")
+        print(f"Tuya: {data.get('success')}")
         if data.get("success"):
             dps = data["result"][0]["value"]
             power_on = dps.get("1", False)
-            print(f"Power: {power_on}")
+            print(f"Power ON: {power_on}")
             return bool(power_on)
     except Exception as e:
-        print(f"Tuya error: {e}")
+        print(f"Tuya ERROR: {e}")
     return None
 
 def format_duration(seconds):
-    h, m = divmod(int(seconds), 3600)
-    m, s = divmod(m, 60)
-    if h > 0: return f"{h}г{m}хв"
-    if m > 0: return f"{m}хв"
-    return f"{s}с"
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    if h > 0:
+        return f"{h}г{m}хв"
+    return f"{m}хв"
 
 async def send_status(context, chat_id=CHANNEL_ID, full=False):
     global last_power_state, power_off_time
@@ -103,14 +102,20 @@ async def send_status(context, chat_id=CHANNEL_ID, full=False):
         msg += f"\n⏱ Без світла: {duration}"
     
     await context.bot.send_message(chat_id=chat_id, text=msg)
-    print(f"Sent: {msg}")
+    print(f"Status sent: {state}")
 
-def build_22_message(text: str) -> str | None:
-    lines = [line.strip() for line in text.splitlines() if (line := line.strip())]
-    if not lines: return None
+def build_22_message(text):
+    lines = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if stripped:
+            lines.append(stripped)
+    if not lines:
+        return None
     
     header = lines[0]
-    for i, line in enumerate(lines):
+    for i in range(len(lines)):
+        line = lines[i]
         if "Підгрупа 2.2" in line:
             block = lines[i:i+5]
             return f"{header}\n\n" + "\n".join(block)
@@ -119,25 +124,26 @@ def build_22_message(text: str) -> str | None:
     return None
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or update.message.caption or "")
+    text = update.message.text or update.message.caption or ""
     payload = build_22_message(text)
     
     if payload:
         await send_status(context, CHANNEL_ID, False)
         payload += "\n\n💡 "
         await context.bot.send_message(chat_id=CHANNEL_ID, text=payload)
-    else:
-        await send_status(context, update.effective_chat.id, True)
+        return
+    
+    await send_status(context, update.effective_chat.id, True)
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await send_status(context, update.effective_chat.id, True)
 
 def main():
-    print("✅ All set, launching...")
+    print("✅ Config OK - launching bot...")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
     app.add_handler(CommandHandler("status", status_cmd))
-    print("🌟 Bot ready! Test /status")
+    print("🌟 Bot live! Send /status")
     app.run_polling()
 
 if __name__ == "__main__":
