@@ -3,6 +3,7 @@ import time
 import requests
 import hmac
 import hashlib
+import asyncio  # ← ДОДАНО ВГОРУ
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
@@ -59,13 +60,13 @@ def format_duration(seconds):
         return f"{h}г {m}хв"
     return f"{m}хв"
 
-async def check_power(context: ContextTypes.DEFAULT_TYPE):
+async def check_power(context=None):
     global last_power_state, power_off_time
     now = time.time()
     power_on = await get_power_status()
 
     if power_on == last_power_state:
-        return  # без змін
+        return
 
     state = "🟢 Світло Є!" if power_on else "🔴 Світла нема"
     duration = ""
@@ -81,7 +82,8 @@ async def check_power(context: ContextTypes.DEFAULT_TYPE):
     if duration:
         msg += f"\n⏱ Без світла було: {duration}"
 
-    await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    await app.bot.send_message(chat_id=CHANNEL_ID, text=msg)
     print(f"🚨 {msg}")
 
 def build_22_message(text):
@@ -102,42 +104,41 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = "🟢 Є" if power else "🔴 НІ"
         await context.bot.send_message(chat_id=CHANNEL_ID, text=f"{payload}\n\n💡 {emoji}")
 
-    await check_power(context)
+    await check_power()
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global last_power_state, power_off_time
 
-    # Спочатку оновлюємо статус
     power = await get_power_status()
     if power is not None:
         last_power_state = power
 
-    if not last_power_state and power_off_time is not None:
-        duration = format_duration(time.time() - power_off_time)
-        text = f"💡 🔴 НІ\n⏱ Без світла: {duration}"
+    now = time.time()
+    if last_power_state:
+        text = "💡 🟢 Є"
     else:
-        text = f"💡 {'🟢 Є' if last_power_state else '🔴 НІ'}"
+        if power_off_time is not None:
+            duration = format_duration(now - power_off_time)
+            text = f"💡 🔴 Без світла: {duration}"
+        else:
+            text = "💡 🔴 Без світла (перше)"
 
     await update.message.reply_text(text)
 
+async def monitor_loop():
+    while True:
+        await check_power()
+        await asyncio.sleep(30)
+
 def main():
+    # Запускаємо моніторинг у фоні
+    asyncio.create_task(monitor_loop())
+    
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
     app.add_handler(CommandHandler("status", status_cmd))
-
-    # 30 секунд моніторинг → канал
-    # ✅ ФІКС - ручний запуск кожні 30с
-import asyncio
-async def periodic_check():
-    while True:
-        await check_power(ApplicationBuilder().token(BOT_TOKEN).build())
-        await asyncio.sleep(30)
-
-# Запуск в фоні
-asyncio.create_task(periodic_check())
-
-    print("⏰ 30s monitoring → канал")
-
+    
+    print("⏰ 30s monitoring → OK!")
     print("🌟 LIVE!")
     app.run_polling()
 
