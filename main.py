@@ -2,78 +2,68 @@ import os
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
-from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram import Update
 
-# Railway ENV
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WORKER_URL = os.environ.get("WORKER_URL")  # https://svitlo-tuya.твій.workers.dev
-DEVICE_ID = os.environ.get("TUYA_DEVICE_ID")  # bfa671762a871e5405rvq4
+WORKER_URL = "https://patient-rice-f0ea.mikolenko-anton1.workers.dev"
+DEVICE_ID = os.environ.get("TUYA_DEVICE_ID")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
 
-print(f"🚀 Bot: {DEVICE_ID[:8]} → {WORKER_URL}")
+print(f"🚀 https://patient-rice-f0ea.mikolenko-anton1.workers.dev + {DEVICE_ID}")
 
 outage_start = None
 
-def get_power_status():
-    """Worker → Tuya"""
+def get_power():
     try:
-        resp = requests.get(f"{WORKER_URL}/status?device={DEVICE_ID}", timeout=8)
-        data = resp.json()
-        print(f"Tuya resp: {data}")
+        r = requests.get(f"{WORKER_URL}/status?device={DEVICE_ID}", timeout=8)
+        data = r.json()
+        print(f"Worker: {data}")
         
         if data.get("success"):
-            for stat in data.get("result", []):
-                if "switch" in stat["code"].lower():
-                    val = stat["value"]
-                    is_on = val is True or val == "true" or val == 1
-                    print(f"Switch {stat['code']}: {val} → {is_on}")
+            for s in data["result"]:
+                if "switch" in s["code"].lower():
+                    val = s["value"]
+                    is_on = val is True or str(val).lower() == "true"
+                    print(f"✅ {s['code']}: {val} = {is_on}")
                     return is_on
         return False
     except Exception as e:
-        print(f"Error: {e}")
+        print(f"❌ {e}")
         return False
 
-def kyiv_time():
+def now_time():
     return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m %H:%M")
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global outage_start
     
-    is_on = get_power_status()
-    now = kyiv_time()
+    power_on = get_power()
+    t = now_time()
     
-    if is_on:
+    if power_on:
+        mins = 0
         if outage_start:
             mins = int((datetime.now(ZoneInfo("Europe/Kyiv")) - outage_start).total_seconds() / 60)
-            msg = f"🟢 Світло Є! {now}\n⏱ Без світла було: {mins}хв"
             outage_start = None
-        else:
-            msg = f"🟢 Світло Є! {now}"
+        msg = f"🟢 Світло Є! {t}"
+        if mins: msg += f"\n⏱ Без світла: {mins}хв"
     else:
-        if outage_start is None:
+        if not outage_start:
             outage_start = datetime.now(ZoneInfo("Europe/Kyiv"))
         mins = int((datetime.now(ZoneInfo("Europe/Kyiv")) - outage_start).total_seconds() / 60)
-        msg = f"🔴 Світла нема {mins}хв {now}"
+        msg = f"🔴 Світла нема {mins}хв {t}"
     
-    # Канал + чат
     await context.bot.send_message(CHANNEL_ID, msg)
     await update.message.reply_text(msg)
-    print(msg)
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or ""
-    if "2.2" in text.lower() or "світло" in text.lower():
-        await status_command(update, context)
+async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "2.2" in update.message.text:
+        await status_cmd(update, context)
 
-def main():
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, message_handler))
-    print("🌟 Railway bot ready!")
-    app.run_polling()
+app = ApplicationBuilder().token(BOT_TOKEN).build()
+app.add_handler(CommandHandler("status", status_cmd))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
 
-if __name__ == "__main__":
-    main()
+print("🌟 Railway + Worker ready!")
+app.run_polling()
