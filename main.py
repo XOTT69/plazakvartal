@@ -14,7 +14,7 @@ from telegram.ext import (
     filters,
 )
 
-print("🚀 SvitloBot 30s mode...")
+print("🚀 SvitloBot 30s mode - FIXED TIMER!")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
@@ -63,7 +63,7 @@ async def check_power(context: ContextTypes.DEFAULT_TYPE):
     global last_power_state, power_off_time
     now = time.time()
     power_on = await get_power_status()
-    
+
     if power_on == last_power_state:
         return  # без змін
 
@@ -102,15 +102,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         emoji = "🟢 Є" if power else "🔴 НІ"
         await context.bot.send_message(chat_id=CHANNEL_ID, text=f"{payload}\n\n💡 {emoji}")
 
-    await check_power(context)  # завжди перевіряємо
+    await check_power(context)
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await check_power(context)
-    power = last_power_state
-    duration = ""
-    if power_off_time is not None:
+    global last_power_state, power_off_time
+
+    # Спочатку оновлюємо статус
+    power = await get_power_status()
+    if power is not None:
+        last_power_state = power
+
+    if not last_power_state and power_off_time is not None:
         duration = format_duration(time.time() - power_off_time)
-    await update.message.reply_text(f"💡 {'🟢 Є' if power else '🔴 НІ'}\n⏱ Без світла: {duration}" if duration else f"💡 {'🟢 Є' if power else '🔴 НІ'}")
+        text = f"💡 🔴 НІ\n⏱ Без світла: {duration}"
+    else:
+        text = f"💡 {'🟢 Є' if last_power_state else '🔴 НІ'}"
+
+    await update.message.reply_text(text)
 
 def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
