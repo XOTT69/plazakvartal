@@ -82,13 +82,13 @@ async def send_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int, force_ch
     now_str = get_kyiv_time()
     
     if is_on:
-        msg = f"🟢 Світло Є! [{now_str}]"
+        msg = f"🟢 Світло Є! {now_str}"
         last_power_on_time = datetime.now(ZoneInfo("Europe/Kyiv"))
     else:
         if outage_mins == 0:
-            msg = f"🔴 Світла нема [{now_str}]"
+            msg = f"🔴 Світла нема {now_str}"
         else:
-            msg = f"🔴 Світла нема {outage_mins}хв [{now_str}]"
+            msg = f"🔴 Світла нема {outage_mins}хв {now_str}"
     
     # Always send to channel on changes or force
     await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
