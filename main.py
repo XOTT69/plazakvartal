@@ -21,14 +21,17 @@ TUYA_ACCESS_SECRET = os.environ["TUYA_ACCESS_SECRET"]
 TUYA_DEVICE_ID = os.environ["TUYA_DEVICE_ID"]
 TUYA_REGION = "eu"
 
-CHECK_INTERVAL = 60  # seconds
+CHECK_INTERVAL = 60          # seconds
 REQUEST_TIMEOUT = 8
 RETRY_COUNT = 2
+CONFIRMATIONS_REQUIRED = 2  # anti-flapping
 
 # ================= STATE =================
-last_state = None        # True / False
-power_off_start = None   # datetime
-last_online = True       # Tuya reachable
+last_state = None            # True / False
+candidate_state = None
+candidate_count = 0
+
+power_off_start = None
 
 # ================= HELPERS =================
 def kyiv_now():
@@ -36,6 +39,13 @@ def kyiv_now():
 
 def kyiv_str():
     return kyiv_now().strftime("%d.%m %H:%M")
+
+def format_minutes(minutes: int) -> str:
+    if minutes < 60:
+        return f"{minutes} хв"
+    h = minutes // 60
+    m = minutes % 60
+    return f"{h} год {m} хв"
 
 def tuya_sign(url, params):
     query = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
@@ -67,7 +77,12 @@ def get_power_status():
 
     for _ in range(RETRY_COUNT):
         try:
-            r = requests.get(url, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
+            r = requests.get(
+                url,
+                headers=headers,
+                params=params,
+                timeout=REQUEST_TIMEOUT
+            )
             data = r.json()
 
             if not data.get("success"):
@@ -79,35 +94,38 @@ def get_power_status():
 
             return None
 
-        except Exception as e:
-            print("Tuya error:", e)
+        except Exception:
             time.sleep(1)
 
     return None
 
 # ================= MONITOR =================
 async def monitor(context: ContextTypes.DEFAULT_TYPE):
-    global last_state, power_off_start, last_online
+    global last_state, candidate_state, candidate_count, power_off_start
 
     status = get_power_status()
     now = kyiv_now()
 
-    # 🟡 Tuya offline
+    # ❌ Tuya/DNS error → ігноруємо
     if status is None:
-        if last_online:
-            last_online = False
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=f"🟡 Немає звʼязку з розеткою Tuya {kyiv_str()}"
-            )
         return
 
-    last_online = True
+    # Anti-flapping
+    if status != candidate_state:
+        candidate_state = status
+        candidate_count = 1
+        return
+    else:
+        candidate_count += 1
+
+    if candidate_count < CONFIRMATIONS_REQUIRED:
+        return
 
     # 🔴 Світло зникло
     if status is False and last_state is not False:
-        power_off_start = now
         last_state = False
+        power_off_start = now
+
         await context.bot.send_message(
             chat_id=CHANNEL_ID,
             text=f"🔴 Світла нема {kyiv_str()}"
@@ -117,25 +135,27 @@ async def monitor(context: ContextTypes.DEFAULT_TYPE):
     # 🟢 Світло зʼявилось
     if status is True and last_state is not True:
         last_state = True
+
         if power_off_start:
             mins = int((now - power_off_start).total_seconds() / 60)
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=f"🟢 Світло Є! ({mins} хв без світла) {kyiv_str()}"
-            )
+            duration = format_minutes(mins)
+            msg = f"🟢 Світло Є! Не було {duration} {kyiv_str()}"
         else:
-            await context.bot.send_message(
-                chat_id=CHANNEL_ID,
-                text=f"🟢 Світло Є! {kyiv_str()}"
-            )
+            msg = f"🟢 Світло Є! {kyiv_str()}"
+
         power_off_start = None
+
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=msg
+        )
 
 # ================= COMMAND =================
 async def status_cmd(update, context):
     state = get_power_status()
 
     if state is None:
-        msg = "🟡 Немає звʼязку з Tuya"
+        msg = "ℹ️ Статус тимчасово недоступний"
     elif state:
         msg = f"🟢 Світло Є {kyiv_str()}"
     else:
@@ -155,7 +175,7 @@ def main():
         first=10
     )
 
-    print("🚀 SvitloBot FULL VERSION RUNNING")
+    print("🚀 SvitloBot FULL STABLE VERSION RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":
