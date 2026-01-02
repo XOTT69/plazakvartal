@@ -24,7 +24,7 @@ TUYA_REGION = "eu"
 CHECK_INTERVAL = 60            # сек
 REQUEST_TIMEOUT = 8
 RETRY_COUNT = 2
-CONFIRMATIONS_REQUIRED = 2    # anti-flapping
+CONFIRMATIONS_REQUIRED = 2    # антифлапінг
 POWER_THRESHOLD_W = 2.0       # >2W = світло є
 
 # ================= STATE =================
@@ -32,7 +32,6 @@ last_state = None             # True / False
 candidate_state = None
 candidate_count = 0
 power_off_start = None
-last_power_w = None
 
 # ================= HELPERS =================
 def kyiv_now():
@@ -63,7 +62,7 @@ def get_power_status():
     Повертає:
       (True, watts)  -> світло є
       (False, watts) -> світла нема
-      (None, None)   -> помилка / недоступно (ігноруємо)
+      (None, None)   -> тимчасово недоступно
     """
     ts = str(int(time.time()))
     url = f"https://{TUYA_REGION}.tuya.com/v1.0/iot-03/devices/{TUYA_DEVICE_ID}/status"
@@ -95,20 +94,30 @@ def get_power_status():
             if not data.get("success"):
                 return None, None
 
-            power_w = None
+            watts = None
+            switch_state = None
 
             for s in data["result"]:
-                # Aubess / Tuya: cur_power зазвичай у деци-ватах
-                if s["code"] == "cur_power":
-                    power_w = s["value"] / 10.0
+                code = s.get("code")
+                value = s.get("value")
 
-            if power_w is None:
-                return None, None
+                # 🔑 Aubess / Tuya: можливі коди потужності
+                if code in ("cur_power", "power", "power_total"):
+                    watts = float(value) / 10.0   # деци-вати → W
+                elif code == "add_ele":
+                    watts = float(value)          # вже в W
+                elif code == "switch_1":
+                    switch_state = bool(value)
 
-            if power_w > POWER_THRESHOLD_W:
-                return True, power_w
-            else:
-                return False, power_w
+            # 🎯 Пріоритет: ватти
+            if watts is not None:
+                return (watts > POWER_THRESHOLD_W), watts
+
+            # 🔁 Fallback: switch
+            if switch_state is not None:
+                return switch_state, 0.0
+
+            return None, None
 
         except Exception:
             time.sleep(1)
@@ -117,19 +126,16 @@ def get_power_status():
 
 # ================= MONITOR =================
 async def monitor(context: ContextTypes.DEFAULT_TYPE):
-    global last_state, candidate_state, candidate_count
-    global power_off_start, last_power_w
+    global last_state, candidate_state, candidate_count, power_off_start
 
     status, watts = get_power_status()
     now = kyiv_now()
 
-    # ❌ Tuya/DNS error → мовчимо
+    # ❌ Tuya/DNS глюк → мовчимо
     if status is None:
         return
 
-    last_power_w = watts
-
-    # Anti-flapping
+    # Антифлапінг
     if status != candidate_state:
         candidate_state = status
         candidate_count = 1
@@ -183,7 +189,7 @@ async def status_cmd(update, context):
     status, watts = get_power_status()
 
     if status is None:
-        msg = "ℹ️ Статус тимчасово недоступний (спробуйте пізніше)"
+        msg = "ℹ️ Статус тимчасово недоступний"
     elif status:
         msg = (
             f"🟢 Світло Є\n"
@@ -211,7 +217,7 @@ def main():
         first=10
     )
 
-    print("🚀 SvitloBot FINAL WATT-BASED VERSION RUNNING")
+    print("🚀 SvitloBot FINAL AUBESS 20A WATT-BASED VERSION RUNNING")
     app.run_polling()
 
 if __name__ == "__main__":
