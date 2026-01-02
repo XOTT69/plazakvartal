@@ -1,47 +1,49 @@
 import os
-import requests
+import tinytuya
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ContextTypes
 from telegram import Update
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
-WORKER_URL = "https://patient-rice-f0ea.mikolenko-anton1.workers.dev"
-DEVICE_ID = os.environ.get("TUYA_DEVICE_ID")
+TUYA_DEVICE_ID = os.environ.get("TUYA_DEVICE_ID")
+TUYA_IP = os.environ.get("TUYA_IP")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
 
-print(f"🚀 https://patient-rice-f0ea.mikolenko-anton1.workers.dev + {DEVICE_ID}")
+print(f"🔌 tinytuya: {TUYA_IP}/{TUYA_DEVICE_ID}")
+
+# Підключення
+device = tinytuya.OutletDevice(TUYA_DEVICE_ID, TUYA_IP, local_key="ffffffff")
+device.set_version(3.3)
+device.logs = False
 
 outage_start = None
 
-def get_power():
+def get_switch():
     try:
-        r = requests.get(f"{WORKER_URL}/status?device={DEVICE_ID}", timeout=8)
-        data = r.json()
-        print(f"Worker: {data}")
-        
-        if data.get("success"):
-            for s in data["result"]:
-                if "switch" in s["code"].lower():
-                    val = s["value"]
-                    is_on = val is True or str(val).lower() == "true"
-                    print(f"✅ {s['code']}: {val} = {is_on}")
-                    return is_on
+        if device.ping():
+            status = device.status()
+            print(f"Status: {status}")
+            switch = status.get('switch_1', 'false')
+            is_on = switch.lower() == 'true' or switch is True
+            print(f"Switch_1: {switch} → {is_on}")
+            return is_on
+        print("❌ No ping")
         return False
     except Exception as e:
-        print(f"❌ {e}")
+        print(f"Error: {e}")
         return False
 
-def now_time():
+def time_kyiv():
     return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m %H:%M")
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global outage_start
     
-    power_on = get_power()
-    t = now_time()
+    is_on = get_switch()
+    t = time_kyiv()
     
-    if power_on:
+    if is_on:
         mins = 0
         if outage_start:
             mins = int((datetime.now(ZoneInfo("Europe/Kyiv")) - outage_start).total_seconds() / 60)
@@ -57,13 +59,13 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await context.bot.send_message(CHANNEL_ID, msg)
     await update.message.reply_text(msg)
 
-async def text_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if "2.2" in update.message.text:
+async def msg_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "2.2" in update.message.text.lower():
         await status_cmd(update, context)
 
 app = ApplicationBuilder().token(BOT_TOKEN).build()
 app.add_handler(CommandHandler("status", status_cmd))
-app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, text_handler))
+app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, msg_handler))
 
-print("🌟 Railway + Worker ready!")
+print("🌟 tinytuya LAN ready!")
 app.run_polling()
