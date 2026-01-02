@@ -3,124 +3,117 @@ import time
 import requests
 import hmac
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
-from telegram.ext import (
-    ApplicationBuilder,
-    ContextTypes,
-    MessageHandler,
-    CommandHandler,
-    filters,
-)
+from telegram.ext import ApplicationBuilder, ContextTypes, MessageHandler, CommandHandler, filters
 
-print("🚀 SvitloBot UA - Aubess 20A - FIXED VERSION")
+print("🚀 SvitloBot - DEBUG + FIX switch detection")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
+TUYA_ACCESS_ID = os.environ.get("TUYA_ACCESS_ID")
+TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET")
+TUYA_DEVICE_ID = os.environ.get("TUYA_DEVICE_ID")
+TUYA_REGION = "eu"  # перевір: eu/us/cn в https://iot.tuya.com
 
-TUYA_ACCESS_ID = os.environ.get("TUYA_ACCESS_ID", "")
-TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
-TUYA_DEVICE_ID = os.environ.get("TUYA_DEVICE_ID", "")
-TUYA_REGION = "eu"  # or "us", "cn" - check your Tuya console [web:17]
-
-# Global state tracking
-last_power_on_time = None
-last_status_check = None
 power_off_start = None
 
-def get_kyiv_time():
+def kyiv_time():
     return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m %H:%M")
 
-def tuya_sign(base_url, params):
-    params_str = "&".join(f"{k}={v}" for k, v in sorted(params.items()))
-    content = f"{base_url}?{params_str}"
-    return hmac.new(TUYA_ACCESS_SECRET.encode(), content.encode(), hashlib.sha256).hexdigest()
-
-async def get_power_status():
-    global last_status_check
+def tuya_api():
+    """Повний DEBUG Tuya відповідь"""
     try:
-        ts = str(int(time.time()))
-        url = f"https://{TUYA_REGION}.tuya.com/v1.0/iot-03/devices/{TUYA_DEVICE_ID}/status"
+        ts = str(int(time.time() * 1000))  # milliseconds!
+        path = f"/v1.0/iot-03/devices/{TUYA_DEVICE_ID}/status"
+        
         params = {
             "access_id": TUYA_ACCESS_ID,
-            "timestamp": ts,
-            "sign": tuya_sign(url.split("?")[0], {"access_id": TUYA_ACCESS_ID, "timestamp": ts})
+            "timestamp": ts
         }
-        headers = {"client_id": TUYA_ACCESS_ID, "sign": params["sign"], "t": ts, "sign_method": "HMAC-SHA256"}
+        # CRITICAL FIX: sign = path + params
+        sign_str = f"{path}?access_id={TUYA_ACCESS_ID}&timestamp={ts}"
+        params["sign"] = hmac.new(TUYA_ACCESS_SECRET.encode(), 
+                                 sign_str.encode(), hashlib.sha256).hexdigest()
         
-        resp = requests.get(url, params=params, headers=headers, timeout=10)
+        url = f"https://{TUYA_REGION}.tuya.com{path}"
+        
+        print(f"🌐 URL: {url}")
+        print(f"🔑 Params: access_id={TUYA_ACCESS_ID[:8]}... ts={ts} sign={params['sign'][:8]}...")
+        
+        resp = requests.get(url, params=params, timeout=10)
+        print(f"📊 Status: {resp.status_code}")
+        print(f"📄 Response: {resp.text[:400]}")
+        
         data = resp.json()
         
-        if data.get("success"):
-            statuses = data["result"]
-            for stat in statuses:
-                if stat["code"] == "switch_1":  # or check your device DPS code [web:20]
-                    is_on = stat["value"]
-                    now = datetime.now(ZoneInfo("Europe/Kyiv"))
-                    last_status_check = now
-                    
-                    if is_on:
-                        global last_power_on_time, power_off_start
-                        last_power_on_time = now
-                        power_off_start = None
-                        return True, 0
-                    else:
-                        if power_off_start is None:
-                            power_off_start = now
-                        outage_duration = int((now - power_off_start).total_seconds() / 60)
-                        return False, outage_duration
-        return None, 0
+        if not data.get("success"):
+            print(f"❌ Tuya fail: {data}")
+            return None
+        
+        # DEBUG ВСІ DPS!
+        dps = data.get("result", [])
+        print("🔍 ALL DPS:")
+        for item in dps:
+            print(f"  {item['code']}: {item['value']} ({type(item['value'])})")
+        
+        # Пошук switch (switch_1, switch_led, power_state...)
+        for item in dps:
+            code = item['code'].lower()
+            value = item['value']
+            if 'switch' in code or 'power' in code or 'plug' in code:
+                is_on = value is True or value == 'true' or value == True or value == 1
+                print(f"💡 FOUND {code} = {value} → {'🟢 ON' if is_on else '🔴 OFF'}")
+                return is_on
+        
+        print("⚠️ Switch DPS не знайдено!")
+        return False
+        
     except Exception as e:
-        print(f"Tuya error: {e}")
-        return None, 0
-
-async def send_status(context: ContextTypes.DEFAULT_TYPE, chat_id: int, force_channel=False):
-    global last_power_on_time
-    is_on, outage_mins = await get_power_status()
-    
-    now_str = get_kyiv_time()
-    
-    if is_on:
-        msg = f"🟢 Світло Є! [{now_str}]"
-        last_power_on_time = datetime.now(ZoneInfo("Europe/Kyiv"))
-    else:
-        if outage_mins == 0:
-            msg = f"🔴 Світла нема [{now_str}]"
-        else:
-            msg = f"🔴 Світла нема {outage_mins}хв [{now_str}]"
-    
-    # Always send to channel on changes or force
-    await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
-    
-    # Send to private chat if not channel
-    if chat_id != CHANNEL_ID:
-        await context.bot.send_message(chat_id=chat_id, text=msg)
-    
-    print(f"Status sent to {chat_id}: {msg}")
+        print(f"💥 Error: {e}")
+        return None
 
 async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_status(context, update.effective_chat.id, False)
+    global power_off_start
+    
+    is_on = tuya_api()
+    now = kyiv_time()
+    
+    if is_on is None:
+        msg = "❌ Tuya помилка - перевір логи"
+    else:
+        if is_on:
+            if power_off_start:
+                mins = int((datetime.now(ZoneInfo("Europe/Kyiv")) - power_off_start).total_seconds() / 60)
+                msg = f"🟢 Світло Є! {now}\n⏱ Без світла було: {mins}хв"
+                power_off_start = None
+            else:
+                msg = f"🟢 Світло Є! {now}"
+        else:
+            if power_off_start is None:
+                power_off_start = datetime.now(ZoneInfo("Europe/Kyiv"))
+            mins = int((datetime.now(ZoneInfo("Europe/Kyiv")) - power_off_start).total_seconds() / 60)
+            msg = f"🔴 Світла нема {mins}хв {now}"
+    
+    print(f"Sending: {msg}")
+    await context.bot.send_message(CHANNEL_ID, msg)
+    await context.bot.send_message(update.effective_chat.id, msg)
 
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = update.message.text or update.message.caption or ""
-    if "2.2" in text.lower() or "світло" in text.lower():
-        await send_status(context, update.effective_chat.id, True)
+async def handle_msg(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text.lower()
+    if '2.2' in text or 'світло' in text:
+        await status_cmd(update, context)
 
 def main():
     if not all([BOT_TOKEN, TUYA_ACCESS_ID, TUYA_ACCESS_SECRET, TUYA_DEVICE_ID]):
-        print("❌ Missing env vars! Set: BOT_TOKEN, CHANNEL_ID, TUYA_ACCESS_ID, TUYA_ACCESS_SECRET, TUYA_DEVICE_ID")
+        print("❌ Set env: BOT_TOKEN, TUYA_*, CHANNEL_ID")
         return
     
-    print("✅ Config OK - launching...")
-    print(f"Device: {TUYA_DEVICE_ID[:8]}... Region: {TUYA_REGION}")
-    
+    print("✅ START - /status покаже повну Tuya відповідь!")
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
     app.add_handler(CommandHandler("status", status_cmd))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
-    
-    print("🌟 Bot ready! Test /status")
+    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_msg))
     app.run_polling()
 
 if __name__ == "__main__":
