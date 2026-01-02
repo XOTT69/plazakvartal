@@ -3,7 +3,7 @@ import time
 import requests
 import hmac
 import hashlib
-import asyncio  # ← ДОДАНО ВГОРУ
+import threading
 from datetime import datetime
 from zoneinfo import ZoneInfo
 from telegram import Update
@@ -15,7 +15,7 @@ from telegram.ext import (
     filters,
 )
 
-print("🚀 SvitloBot 30s mode - FIXED TIMER!")
+print("🚀 SvitloBot 30s mode - NO ASYNC!")
 
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
@@ -29,6 +29,7 @@ print(f"TUYA_DEVICE_ID: {len(TUYA_DEVICE_ID)} chars")
 
 last_power_state = False
 power_off_time = None
+monitor_running = False
 
 def kyiv_time():
     return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m %H:%M")
@@ -60,7 +61,11 @@ def format_duration(seconds):
         return f"{h}г {m}хв"
     return f"{m}хв"
 
-async def check_power(context=None):
+async def send_status_message(msg):
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+    await app.bot.send_message(chat_id=CHANNEL_ID, text=msg)
+
+async def check_power():
     global last_power_state, power_off_time
     now = time.time()
     power_on = await get_power_status()
@@ -82,9 +87,14 @@ async def check_power(context=None):
     if duration:
         msg += f"\n⏱ Без світла було: {duration}"
 
-    app = ApplicationBuilder().token(BOT_TOKEN).build()
-    await app.bot.send_message(chat_id=CHANNEL_ID, text=msg)
+    await send_status_message(msg)
     print(f"🚨 {msg}")
+
+def monitor_thread():
+    global monitor_running
+    while monitor_running:
+        asyncio.run(check_power())
+        time.sleep(30)
 
 def build_22_message(text):
     lines = [l.strip() for l in text.splitlines() if l.strip()]
@@ -125,20 +135,19 @@ async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(text)
 
-async def monitor_loop():
-    while True:
-        await check_power()
-        await asyncio.sleep(30)
-
 def main():
-    # Запускаємо моніторинг у фоні
-    asyncio.create_task(monitor_loop())
+    global monitor_running
+    monitor_running = True
+    
+    # Запускаємо моніторинг в окремому потоці
+    monitor = threading.Thread(target=monitor_thread, daemon=True)
+    monitor.start()
     
     app = ApplicationBuilder().token(BOT_TOKEN).build()
     app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, handle_message))
     app.add_handler(CommandHandler("status", status_cmd))
     
-    print("⏰ 30s monitoring → OK!")
+    print("⏰ 30s monitoring → THREAD OK!")
     print("🌟 LIVE!")
     app.run_polling()
 
