@@ -126,7 +126,16 @@ def main():
     app.add_handler(CommandHandler("status", status_cmd))
 
     # 30 секунд моніторинг → канал
-    app.job_queue.run_repeating(check_power, interval=30, first=10)
+    # ✅ ФІКС - ручний запуск кожні 30с
+import asyncio
+async def periodic_check():
+    while True:
+        await check_power(ApplicationBuilder().token(BOT_TOKEN).build())
+        await asyncio.sleep(30)
+
+# Запуск в фоні
+asyncio.create_task(periodic_check())
+
     print("⏰ 30s monitoring → канал")
 
     print("🌟 LIVE!")
