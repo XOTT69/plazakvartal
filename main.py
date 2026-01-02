@@ -3,8 +3,9 @@ import time
 import requests
 import hmac
 import hashlib
-from datetime import datetime, timedelta
+from datetime import datetime
 from zoneinfo import ZoneInfo
+
 from telegram import Update
 from telegram.ext import (
     ApplicationBuilder,
@@ -14,8 +15,9 @@ from telegram.ext import (
     filters,
 )
 
-print("🚀 SvitloBot UA - RAILWAY 100% GREEN")
+print("🚀 SvitloBot 30s mode...")
 
+# ================== ENV ==================
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHANNEL_ID = int(os.environ.get("CHANNEL_ID", "-1003534080985"))
 
@@ -24,108 +26,158 @@ TUYA_ACCESS_SECRET = os.environ.get("TUYA_ACCESS_SECRET", "")
 TUYA_DEVICE_ID = os.environ.get("TUYA_DEVICE_ID", "")
 TUYA_REGION = "eu"
 
-# Global outage tracker
-power_off_start = None
-last_state = None
+print(f"TUYA_DEVICE_ID length: {len(TUYA_DEVICE_ID)}")
 
+# ================== STATE ==================
+last_power_state = None     # None = ще не ініціалізовано
+power_off_time = None
+
+# ================== HELPERS ==================
 def kyiv_time():
     return datetime.now(ZoneInfo("Europe/Kyiv")).strftime("%d.%m %H:%M")
 
-def tuya_signature(path, params):
-    p_str = "&".join(f"{k}={params[k]}" for k in sorted(params))
-    sign_str = f"{path}?{p_str}"
-    return hmac.new(TUYA_ACCESS_SECRET.encode(), sign_str.encode(), hashlib.sha256).hexdigest()
+def format_duration(seconds):
+    seconds = int(seconds)
+    h, rem = divmod(seconds, 3600)
+    m = rem // 60
+    if h > 0:
+        return f"{h}г {m}хв"
+    return f"{m}хв"
 
-def tuya_status():
+def tuya_sign(base_url, params):
+    params_str = "&".join([f"{k}={v}" for k, v in sorted(params.items())])
+    content = f"{base_url}?{params_str}"
+    return hmac.new(
+        TUYA_ACCESS_SECRET.encode(),
+        content.encode(),
+        hashlib.sha256
+    ).hexdigest()
+
+async def get_power_status():
+    if not all([TUYA_DEVICE_ID, TUYA_ACCESS_ID, TUYA_ACCESS_SECRET]):
+        return None
+
     try:
-        ts = str(int(time.time_ns() // 1_000_000))  # ms
-        path = f"/v1.0/iot-03/devices/{TUYA_DEVICE_ID}/status"
+        ts = str(int(time.time()))
+        url = f"https://{TUYA_REGION}.tuya.com/v1.0/iot-03/devices/{TUYA_DEVICE_ID}/status"
         params = {"access_id": TUYA_ACCESS_ID, "timestamp": ts}
-        params["sign"] = tuya_signature(path, params)
-        
-        url = f"https://{TUYA_REGION}.tuya.com{path}"
-        r = requests.get(url, params=params, timeout=8)
-        data = r.json()
-        
-        print(f"Tuya: {data.get('success')}")
-        
-        if data.get("success"):
-            for s in data["result"]:
-                if s["code"] == "switch_1":
-                    return s["value"] == True
-        
-        return None
-    except:
-        return None
+        sign = tuya_sign(url, params)
 
-def outage_duration():
-    if power_off_start:
-        now = datetime.now(ZoneInfo("Europe/Kyiv"))
-        mins = int((now - power_off_start).total_seconds() / 60)
-        return max(0, mins)
-    return 0
+        headers = {
+            "client_id": TUYA_ACCESS_ID,
+            "sign": sign,
+            "t": ts,
+            "sign_method": "HMAC-SHA256",
+        }
 
-async def send_status_msg(context: ContextTypes.DEFAULT_TYPE, chat_id, to_channel=False):
-    global power_off_start, last_state
-    
-    power_on = tuya_status()
+        resp = requests.get(url, params=params, headers=headers, timeout=5).json()
+        if resp.get("success"):
+            # 🔌 беремо перший DP (розетка)
+            return bool(resp["result"][0]["value"])
+    except Exception as e:
+        print("❌ Tuya error:", e)
+
+    return None
+
+# ================== CORE ==================
+async def check_power(context: ContextTypes.DEFAULT_TYPE):
+    global last_power_state, power_off_time
+
+    power_on = await get_power_status()
     if power_on is None:
-        await context.bot.send_message(chat_id=chat_id, text="❌ Tuya недоступний")
         return
-    
-    outage_min = outage_duration()
-    time_str = kyiv_time()
-    changed = last_state is not None and last_state != power_on
-    last_state = power_on
-    
+
+    now = time.time()
+
+    # 🔹 Перший запуск — тільки ініціалізація
+    if last_power_state is None:
+        last_power_state = power_on
+        if not power_on:
+            power_off_time = now
+        print(f"⚡ Init state: {'ON' if power_on else 'OFF'}")
+        return
+
+    # 🔹 Без змін
+    if power_on == last_power_state:
+        return
+
+    # 🔹 Зміна стану
     if power_on:
-        power_off_start = None
-        extra = f"\n⏱ Без світла: {outage_min}хв" if outage_min else ""
-        msg = f"🟢 Світло Є! {time_str}{extra}"
+        duration = ""
+        if power_off_time:
+            duration = format_duration(now - power_off_time)
+            power_off_time = None
+
+        msg = f"🟢 Світло Є! {kyiv_time()}"
+        if duration:
+            msg += f"\n⏱ Без світла було: {duration}"
     else:
-        if power_off_start is None:
-            power_off_start = datetime.now(ZoneInfo("Europe/Kyiv"))
-        mins_text = f"{outage_min}хв " if outage_min else ""
-        msg = f"🔴 Світла нема {mins_text}{time_str}"
-    
-    if changed or to_channel:
-        await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
-        print(f"🔄 CHANGE → канал: {msg}")
-    
-    await context.bot.send_message(chat_id=chat_id, text=msg)
-    print(f"Status: {'🟢' if power_on else '🔴'} | {outage_min}хв")
+        power_off_time = now
+        msg = f"🔴 Світла нема {kyiv_time()}"
 
-async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await send_status_msg(context, update.effective_chat.id, True)
+    last_power_state = power_on
 
-async def message_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = (update.message.text or update.message.caption or "").lower()
-    if "2.2" in text or "світло" in text or "статус" in text:
-        await send_status_msg(context, update.effective_chat.id, True)
+    await context.bot.send_message(chat_id=CHANNEL_ID, text=msg)
+    print(f"📢 {msg}")
 
-def main():
-    vars_check = {
-        "BOT_TOKEN": BOT_TOKEN,
-        "TUYA_ACCESS_ID": TUYA_ACCESS_ID, 
-        "TUYA_ACCESS_SECRET": TUYA_ACCESS_SECRET,
-        "TUYA_DEVICE_ID": TUYA_DEVICE_ID
-    }
-    
-    missing = [k for k, v in vars_check.items() if not v]
-    if missing:
-        print("❌ Потрібно:", ", ".join(missing))
+# ================== 2.2 PARSER ==================
+def build_22_message(text):
+    lines = [l.strip() for l in text.splitlines() if l.strip()]
+    if not lines:
+        return None
+
+    header = lines[0]
+    for line in lines:
+        if "2.2" in line:
+            return f"{header}\n\n{line}"
+    return None
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = update.message.text or update.message.caption or ""
+    payload = build_22_message(text)
+
+    if payload:
+        power = await get_power_status()
+        emoji = "🟢 Є" if power else "🔴 НІ"
+        await context.bot.send_message(
+            chat_id=CHANNEL_ID,
+            text=f"{payload}\n\n💡 {emoji}"
+        )
+
+    await check_power(context)
+
+# ================== COMMANDS ==================
+async def status_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    power = await get_power_status()
+    if power is None:
+        await update.message.reply_text("❌ Немає даних")
         return
-    
-    print("✅ ✅ ✅ ВСІ ЗМІННІ ОК!")
-    print(f"🚀 {TUYA_DEVICE_ID[:8]}...")
-    
-    # ✅ 100% Railway PTB 21.7 - БЕЗ request/http_version!
+
+    if not power and power_off_time:
+        duration = format_duration(time.time() - power_off_time)
+    else:
+        duration = "є світло"
+
+    await update.message.reply_text(
+        f"💡 {'🟢 Є' if power else '🔴 НІ'}\n⏱ Без світла: {duration}"
+    )
+
+# ================== MAIN ==================
+def main():
     app = ApplicationBuilder().token(BOT_TOKEN).build()
-    
-    app.add_handler(CommandHandler("status", status_command))
-    app.add_handler(MessageHandler((filters.TEXT | filters.CAPTION) & ~filters.COMMAND, message_handler))
-    
-    print("🌟 Bot готовий! /status")
+
+    app.add_handler(CommandHandler("status", status_cmd))
+    app.add_handler(
+        MessageHandler(
+            (filters.TEXT | filters.CAPTION) & ~filters.COMMAND,
+            handle_message
+        )
+    )
+
+    app.job_queue.run_repeating(check_power, interval=30, first=10)
+    print("⏰ Monitoring every 30s")
+    print("🌟 LIVE!")
+
     app.run_polling()
 
 if __name__ == "__main__":
