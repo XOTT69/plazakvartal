@@ -14,15 +14,17 @@ CHANNEL_ID = -1003534080985
 
 
 def format_duration(start_str: str, end_str: str) -> str:
-    """Рахує та форматує тривалість проміжку як '(X год)'."""
+    """Рахує та форматує тривалість проміжку як '(X.X год)' з хвилинами."""
     try:
-        start = timedelta(hours=int(start_str[:2]), minutes=int(start_str[3:5]))
-        end = timedelta(hours=int(end_str[:2]), minutes=int(end_str[3:5]))
+        start_h, start_m = map(int, start_str.split(':'))
+        end_h, end_m = map(int, end_str.split(':'))
+        start = timedelta(hours=start_h, minutes=start_m)
+        end = timedelta(hours=end_h, minutes=end_m)
         duration = end - start
         if duration.total_seconds() <= 0:
             return ""
         hours = duration.total_seconds() / 3600
-        return f"({hours:.0f} год)"
+        return f"({hours:.1f} год)"
     except ValueError:
         return ""
 
@@ -39,20 +41,23 @@ def parse_dark_hours(text: str) -> tuple[str, str]:
     
     for pattern in patterns:
         matches = list(re.finditer(pattern, modified_text, re.IGNORECASE))
-        for match in reversed(matches):  # Зворотний порядок, щоб не зсувати індекси
-            start_str, end_str = match.groups()
-            duration_str = format_duration(start_str, end_str)
-            if duration_str:
-                # Замінюємо проміжок на проміжок+дужки (з пробілом перед)
-                replacement = f"{start_str}-{end_str}{duration_str}"
-                modified_text = (modified_text[:match.start()] + 
-                               replacement + 
-                               modified_text[match.end():])
-                # Додаємо до загальної тривалості
-                start_td = timedelta(hours=int(start_str[:2]), minutes=int(start_str[3:5]))
-                end_td = timedelta(hours=int(end_str[:2]), minutes=int(end_str[3:5]))
-                dur_td = end_td - start_td
-                total_minutes += dur_td.total_seconds() / 60
+        for match in reversed(matches):  # Зворотний порядок
+            groups = match.groups()
+            if len(groups) == 2:
+                start_str, end_str = groups
+                duration_str = format_duration(start_str, end_str)
+                if duration_str:
+                    # Видаляємо оригінальний пробіл/розділювач перед заміною
+                    prefix = "–" if "–" in match.group(0) else "-"
+                    replacement = f"{start_str}{prefix}{end_str}{duration_str}"
+                    modified_text = (modified_text[:match.start()] + 
+                                   replacement + 
+                                   modified_text[match.end():])
+                    # Додаємо до загальної тривалості
+                    start_h, start_m = map(int, start_str.split(':'))
+                    end_h, end_m = map(int, end_str.split(':'))
+                    dur_td = timedelta(hours=end_h - start_h, minutes=end_m - start_m)
+                    total_minutes += dur_td.total_seconds() / 60
     
     hours = total_minutes / 60
     summary = f"⚫ Без світла: {hours:.1f} годин" if hours > 0 else ""
